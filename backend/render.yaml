@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: cisms-api-service
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 5000
+      - key: DATABASE_URL
+        sync: false # User will input their Supabase connection string securely on Render dashboard
