@@ -1,0 +1,10 @@
+CREATE TABLE refresh_tokens (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  jti VARCHAR(128) NOT NULL UNIQUE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  revoked BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);

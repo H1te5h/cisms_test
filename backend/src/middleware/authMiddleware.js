@@ -6,11 +6,11 @@ export function authenticateToken(req, res, next) {
   const token = authHeader && authHeader.split(' ')[1]; // Bearer <token>
 
   if (!token) {
-    return res.status(401).json({ error: 'Authentication token is missing. Access denied.' });
+    return res.status(401).json({ error: 'NoAuthenticationToken', message: 'Authentication token is missing. Access denied.' });
   }
-
+const secret = process.env.JWT_SECRET
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'cisms_super_secure_secret_key_123!');
+    const decoded = jwt.verify(token,secret, { algorithms: ['HS256'] });
     req.user = decoded; // Attach user info (id, email, role, tenantId, tenantSubdomain)
     
     // Inject headers to ensure backwards compatibility with database loggers

@@ -16,6 +16,11 @@ import auditRouter from './routes/audit.js';
 
 dotenv.config();
 
+if (!process.env.JWT_SECRET || !process.env.JWT_REFRESH_SECRET) {
+  console.error('FATAL: JWT_SECRET and JWT_REFRESH_SECRET must be set.');
+  process.exit(1);
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 

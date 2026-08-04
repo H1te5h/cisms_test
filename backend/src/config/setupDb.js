@@ -163,6 +163,13 @@ async function runSetup() {
     await client.query(setupSql);
     console.log("Schemas defined successfully. Seeding initial records...");
 
+    // ONLY run demo seeding when SEED_DEMO=true (development/testing)
+    if (process.env.SEED_DEMO !== 'true') {
+      console.log('SEED_DEMO is not set to "true". Skipping demo data seed.');
+      await client.end();
+      return;
+    }
+    
     // Fixed UUIDs for repeatable seed testing
     const tenant1Id = 'd0000000-0000-0000-0000-000000000001';
     const tenant2Id = 'd0000000-0000-0000-0000-000000000002';
