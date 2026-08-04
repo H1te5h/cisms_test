@@ -8,7 +8,11 @@ export function authenticateToken(req, res, next) {
   if (!token) {
     return res.status(401).json({ error: 'NoAuthenticationToken', message: 'Authentication token is missing. Access denied.' });
   }
-const secret = process.env.JWT_SECRET
+const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    console.error('FATAL: JWT_SECRET missing in auth middleware');
+    return res.status(500).json({error: 'ServerMisconfiguration'});
+  }
   try {
     const decoded = jwt.verify(token,secret, { algorithms: ['HS256'] });
     req.user = decoded; // Attach user info (id, email, role, tenantId, tenantSubdomain)

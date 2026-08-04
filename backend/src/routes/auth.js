@@ -5,15 +5,18 @@ import rateLimit from 'express-rate-limit';
 import pool from '../db.js';
 import { logToDb } from '../utils/logger.js';
 import { authenticateToken } from '../middleware/authMiddleware.js';
-import {v4 as uuidv4 } from 'uuid';
-import { revokeRefreshTokenByJti } from '../utils/tokenStore.js';
+import { v4 as uuidv4 } from 'uuid';
+
+// token store helpers
+import { saveRefreshToken, getRefreshTokenByJti, revokeRefreshTokenByJti } from '../utils/tokenStore.js';
+
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 
-if (!JWT_SECRET || !JWT_REFRESH_SECRET){
-  console.error('FATAL: JWT_SECRET and JST_REFRESH_SECRET must be set in environment.');
+if (!JWT_SECRET || !JWT_REFRESH_SECRET) {
+  console.error('FATAL: JWT_SECRET and JWT_REFRESH_SECRET must be set in environment.');
   process.exit(1);
 }
 
@@ -41,15 +44,15 @@ function generateTokens(user) {
     expiresIn: '15m',
     algorithm: 'HS256' 
   });
-  const refreshJTi = uuidv4();
+  const refreshJti = uuidv4();
 
   const refreshToken = jwt.sign(payload, JWT_REFRESH_SECRET, { 
     expiresIn: '7d', 
-    jwtid: refreshJTi,
+    jwtid: refreshJti,
     algorithm: 'HS256'   
   });
 
-  return { accessToken, refreshToken, refreshJTi };
+  return { accessToken, refreshToken, refreshJti };
 }
 
 // POST login endpoint
@@ -84,14 +87,21 @@ router.post('/login', loginLimiter, async (req, res) => {
     }
 
     // Generate JWT tokens
-    const { accessToken, refreshToken } = generateTokens(user);
+    const { accessToken, refreshToken, refreshJti } = generateTokens(user);
 
-    // Adding code for persisting refresh token jti server-side so it can be revoked which use tokenStore helper
-    await saveRefreshToken(
-      user.id,
-      refreshJTi,
-      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-    )
+    // Persist the refresh token identifier server-side so it can be revoked or rotated
+    try {
+      await saveRefreshToken(
+        user.id,
+        refreshJti,
+        new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+      );
+    } catch (err) {
+      console.error('Failed to persist refresh token jti:', err);
+      // fail-open: clear cookie and return 500 to avoid issuing a refresh token we can't revoke
+      return res.status(500).json({ error: 'InternalServerError', message: 'Failed to initialize session.' });
+    }
+
     // Save refresh token in HttpOnly secure cookie
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
@@ -136,56 +146,58 @@ router.post('/login', loginLimiter, async (req, res) => {
 
 // POST token refresh endpoint
 router.post('/refresh', async (req, res) => {
-  const refreshToken = req.cookies.refreshToken;
-if (!refreshToken) {
-  return res.status(401).json({ error: 'NoRefreshToken', message: 'Session expired. Please log in again.' });
-}
-
-try {
-  // Verify signature and extract payload and jwtid
-  const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] });
-  const jti = decoded.jti || decoded?.jti || decoded?.jti; // jwt.verify returns .jti for token with jwtid
-
-  if (!jti) {
-    return res.status(401).json({ error: 'InvalidRefreshToken', message: 'Missing token identifier.' });
+  const refreshToken = req.cookies?.refreshToken;
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'NoRefreshToken', message: 'Session expired. Please log in again.' });
   }
 
-  // Confirm refresh token jti is present and not revoked in DB
-  const tokenRow = await getRefreshTokenByJti(jti);
-  if (!tokenRow || tokenRow.revoked) {
-    return res.status(401).json({ error: 'InvalidRefreshToken', message: 'Refresh token revoked or unknown.' });
-  }
+  try {
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET, { algorithms: ['HS256'] });
+    const jti = decoded.jti;
+    if (!jti) {
+      return res.status(401).json({ error: 'InvalidRefreshToken', message: 'Missing token identifier.' });
+    }
 
-  // Optionally verify token expiration by tokenRow.expires_at
+    const tokenRow = await getRefreshTokenByJti(jti);
+    if (!tokenRow || tokenRow.revoked) {
+      return res.status(401).json({ error: 'InvalidRefreshToken', message: 'Refresh token revoked or unknown.' });
+    }
 
-  // Verify user still exists
-  const userRes = await pool.query(
-    `SELECT u.id, u.email, u.name, u.role, u.tenant_id, t.subdomain 
-     FROM users u
-     JOIN tenants t ON u.tenant_id = t.id
-     WHERE u.id = $1`,
-    [decoded.id]
-  );
-  if (userRes.rows.length === 0) {
-    return res.status(401).json({ error: 'UserNotFound' });
-  }
-  const user = userRes.rows[0];
+    // Check server-side expiration
+    if (tokenRow.expires_at && new Date(tokenRow.expires_at) < new Date()) {
+      // Token is expired server-side; revoke and reject
+      await revokeRefreshTokenByJti(jti);
+      return res.status(401).json({ error: 'InvalidRefreshToken', message: 'Refresh token expired.' });
+    }
 
-  // Rotate: revoke existing refresh token row (mark revoked), create new jti+refresh token and persist
-  await revokeRefreshTokenByJti(jti);
+    // Verify user still exists
+    const userRes = await pool.query(
+      `SELECT u.id, u.email, u.name, u.role, u.tenant_id, t.subdomain 
+       FROM users u
+       JOIN tenants t ON u.tenant_id = t.id
+       WHERE u.id = $1`,
+      [decoded.id]
+    );
+    if (userRes.rows.length === 0) {
+      return res.status(401).json({ error: 'UserNotFound' });
+    }
+    const user = userRes.rows[0];
 
-  const { accessToken: newAccessToken, refreshToken: newRefreshToken, refreshJti: newRefreshJti } = generateTokens(user);
-  await saveRefreshToken(user.id, newRefreshJti, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+    // Rotate: revoke existing refresh token row, issue a new refresh token and persist it
+    await revokeRefreshTokenByJti(jti);
 
-  // Set new cookie (rotated)
-  res.cookie('refreshToken', newRefreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: 7 * 24 * 60 * 60 * 1000
-  });
+    const { accessToken: newAccessToken, refreshToken: newRefreshToken, refreshJti: newRefreshJti } = generateTokens(user);
+    await saveRefreshToken(user.id, newRefreshJti, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
-  res.json({ accessToken: newAccessToken });
+    // Set new cookie (rotated)
+    res.cookie('refreshToken', newRefreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
+
+    res.json({ accessToken: newAccessToken });
   } catch (error) {
     console.error("Token Refresh Error:", error);
     return res.status(401).json({ error: 'InvalidRefreshToken', message: 'Session verification failed. Please login.' });

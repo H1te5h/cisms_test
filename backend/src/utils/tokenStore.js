@@ -1,10 +1,15 @@
 import pool from '../db.js';
 
 export async function saveRefreshToken(userId, jti, expiresAt) {
-  await pool.query(
-    'INSERT INTO refresh_tokens (jti, user_id, expires_at) VALUES ($1, $2, $3)',
-    [jti, userId, expiresAt]
-  );
+  try {
+    await pool.query(
+      'INSERT INTO refresh_tokens (jti, user_id, expires_at) VALUES ($1, $2, $3)',
+      [jti, userId, expiresAt]
+    );
+  } catch (err){
+    console.error('saveRefreshToken error: ', err);
+    throw err;
+  }
 }
 
 export async function getRefreshTokenByJti(jti) {
